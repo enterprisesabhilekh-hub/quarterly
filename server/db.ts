@@ -107,6 +107,8 @@ export function initializeDatabase() {
       ministry_id INTEGER REFERENCES ministries(id),
       province_id INTEGER REFERENCES provinces(id),
       is_active INTEGER NOT NULL DEFAULT 1,
+      approval_status TEXT NOT NULL DEFAULT 'approved',
+      must_change_password INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -382,6 +384,40 @@ export function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_notifications_office ON notifications(office_id);
   `);
 
+  const userColumns = db.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  if (!userColumns.some((column) => column.name === 'approval_status')) {
+    db.exec("ALTER TABLE users ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'");
+  }
+  if (!userColumns.some((column) => column.name === 'must_change_password')) {
+    db.exec('ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0');
+  }
+  db.prepare(
+    `UPDATE users
+     SET full_name_np = CASE username
+           WHEN 'superadmin' THEN 'प्रणाली प्रशासक'
+           WHEN 'nvcadmin' THEN 'केन्द्र प्रशासक'
+           WHEN 'reviewer' THEN 'समीक्षा अधिकृत'
+           WHEN 'mohaministry' THEN 'मन्त्रालय प्रयोगकर्ता'
+           WHEN 'daoktm' THEN 'कार्यालय प्रयोगकर्ता'
+           WHEN 'lalitpurmun' THEN 'कार्यालय प्रयोगकर्ता'
+           WHEN 'daodarchula' THEN 'कार्यालय प्रयोगकर्ता'
+           WHEN 'auditor' THEN 'अवलोकनकर्ता'
+         END,
+         full_name_en = CASE username
+           WHEN 'superadmin' THEN 'System Administrator'
+           WHEN 'nvcadmin' THEN 'Center Administrator'
+           WHEN 'reviewer' THEN 'Review Officer'
+           WHEN 'mohaministry' THEN 'Ministry User'
+           WHEN 'daoktm' THEN 'Government Office User'
+           WHEN 'lalitpurmun' THEN 'Government Office User'
+           WHEN 'daodarchula' THEN 'Government Office User'
+           WHEN 'auditor' THEN 'Viewer'
+         END,
+         designation_np = '',
+         designation_en = ''
+     WHERE username IN ('superadmin', 'nvcadmin', 'reviewer', 'mohaministry', 'daoktm', 'lalitpurmun', 'daodarchula', 'auditor')`
+  ).run();
+
   const roleCount = (db.prepare('SELECT COUNT(*) as c FROM roles').get() as { c: number }).c;
   if (roleCount === 0) {
     seedInitialData();
@@ -555,18 +591,18 @@ function seedInitialData() {
     // 9. Users (all 6 roles)
     const demoPassHash = hashSeedPassword('Nvc@2083');
     const usersSeed = [
-      { id: 1, un: 'superadmin', em: 'superadmin@nvc.gov.np', np: 'महेश्वर न्यौपाने', en: 'Maheshwor Neupane', dnp: 'प्रमुख सूचना प्रविधि निर्देशक', den: 'Chief IT Director', ph: '01-4200101', min: null, prov: null, roleId: 1 },
-      { id: 2, un: 'nvcadmin', em: 'admin@nvc.gov.np', np: 'सरिता अधिकारी', en: 'Sarita Adhikari', dnp: 'सह-सचिव (अनुगमन महाशाखा)', den: 'Joint Secretary (Monitoring Division)', ph: '01-4200102', min: null, prov: null, roleId: 2 },
-      { id: 3, un: 'reviewer', em: 'reviewer@nvc.gov.np', np: 'राजन कुमार पौडेल', en: 'Rajan Kumar Poudel', dnp: 'उप-सचिव (समीक्षा अधिकृत)', den: 'Under Secretary (Review Officer)', ph: '01-4200103', min: null, prov: null, roleId: 3 },
-      { id: 4, un: 'mohaministry', em: 'ministry@moha.gov.np', np: 'दीपकराज नेपाल', en: 'Dipak Raj Nepal', dnp: 'मन्त्रालय अनुगमन फोकल पर्सन', den: 'Ministry Monitoring Focal Person', ph: '01-4211214', min: 2, prov: null, roleId: 4 },
-      { id: 5, un: 'daoktm', em: 'office.dao.ktm@gov.np', np: 'नारायण प्रसाद शर्मा', en: 'Narayan Prasad Sharma', dnp: 'प्रशासकीय अधिकृत (प्रतिवेदन अधिकारी)', den: 'Administrative Officer (Reporting Officer)', ph: '9841223344', min: 2, prov: 3, roleId: 5 },
-      { id: 6, un: 'lalitpurmun', em: 'office.lalitpur@gov.np', np: 'प्रभा श्रेष्ठ', en: 'Prabha Shrestha', dnp: 'योजना तथा अनुगमन अधिकृत', den: 'Planning & Monitoring Officer', ph: '9851144556', min: 4, prov: 3, roleId: 5 },
-      { id: 7, un: 'daodarchula', em: 'office.darchula@gov.np', np: 'लोकेन्द्र बहादुर बडाल', en: 'Lokendra Bahadur Badal', dnp: 'नायब सुब्बा (सहायक प्रतिवेदन अधिकारी)', den: 'Nayab Subba (Reporting Officer)', ph: '9848776655', min: 2, prov: 7, roleId: 5 },
-      { id: 8, un: 'auditor', em: 'auditor@nvc.gov.np', np: 'विमल कोइराला', en: 'Bimal Koirala', dnp: 'वरिष्ठ लेखापरीक्षक', den: 'Senior Auditor', ph: '01-4200199', min: null, prov: null, roleId: 6 },
+      { id: 1, un: 'superadmin', em: 'superadmin@nvc.gov.np', np: 'प्रणाली प्रशासक', en: 'System Administrator', dnp: '', den: '', ph: '', min: null, prov: null, roleId: 1 },
+      { id: 2, un: 'nvcadmin', em: 'admin@nvc.gov.np', np: 'केन्द्र प्रशासक', en: 'Center Administrator', dnp: '', den: '', ph: '', min: null, prov: null, roleId: 2 },
+      { id: 3, un: 'reviewer', em: 'reviewer@nvc.gov.np', np: 'समीक्षा अधिकृत', en: 'Review Officer', dnp: '', den: '', ph: '', min: null, prov: null, roleId: 3 },
+      { id: 4, un: 'mohaministry', em: 'ministry@moha.gov.np', np: 'मन्त्रालय प्रयोगकर्ता', en: 'Ministry User', dnp: '', den: '', ph: '', min: 2, prov: null, roleId: 4 },
+      { id: 5, un: 'daoktm', em: 'office.dao.ktm@gov.np', np: 'कार्यालय प्रयोगकर्ता', en: 'Government Office User', dnp: '', den: '', ph: '', min: 2, prov: 3, roleId: 5 },
+      { id: 6, un: 'lalitpurmun', em: 'office.lalitpur@gov.np', np: 'कार्यालय प्रयोगकर्ता', en: 'Government Office User', dnp: '', den: '', ph: '', min: 4, prov: 3, roleId: 5 },
+      { id: 7, un: 'daodarchula', em: 'office.darchula@gov.np', np: 'कार्यालय प्रयोगकर्ता', en: 'Government Office User', dnp: '', den: '', ph: '', min: 2, prov: 7, roleId: 5 },
+      { id: 8, un: 'auditor', em: 'auditor@nvc.gov.np', np: 'अवलोकनकर्ता', en: 'Viewer', dnp: '', den: '', ph: '', min: null, prov: null, roleId: 6 },
     ];
     const insUser = db.prepare(
-      `INSERT INTO users (id, username, email, password_hash, full_name_np, full_name_en, designation_np, designation_en, phone, ministry_id, province_id, is_active)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+      `INSERT INTO users (id, username, email, password_hash, full_name_np, full_name_en, designation_np, designation_en, phone, ministry_id, province_id, is_active, approval_status, must_change_password)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'approved', 0)`
     );
     const insUserRole = db.prepare('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)');
     for (const u of usersSeed) {

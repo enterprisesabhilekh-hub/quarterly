@@ -1,66 +1,18 @@
-import React, { useState } from 'react';
-import { Lock, Mail, Eye, EyeOff, ArrowRight, KeyRound, ShieldCheck, Globe } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Lock, Mail, Eye, EyeOff, ArrowRight, KeyRound, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { useI18n } from '../context/I18nContext.tsx';
-import { NvcLogo } from './NvcLogo.tsx';
-
-const ROLE_ACCOUNTS = [
-  {
-    roleNp: 'सुपर एडमिनिस्ट्रेटर',
-    roleEn: 'Super Administrator',
-    email: 'superadmin@nvc.gov.np',
-    descNp: 'प्रणाली, प्रयोगकर्ता, मास्टर डाटा र अवधि व्यवस्थापन',
-    descEn: 'System config, users, master data & period setup',
-  },
-  {
-    roleNp: 'केन्द्र प्रशासक (NVC Admin)',
-    roleEn: 'NVC Administrator',
-    email: 'admin@nvc.gov.np',
-    descNp: 'राष्ट्रिय ड्यासबोर्ड, नक्सा, समीक्षा तथा Excel/PDF निर्यात',
-    descEn: 'National dashboard, map, reviews & Excel/PDF exports',
-  },
-  {
-    roleNp: 'केन्द्र समीक्षा अधिकृत',
-    roleEn: 'Center Review Officer',
-    email: 'reviewer@nvc.gov.np',
-    descNp: 'सूचकगत समीक्षा, टिप्पणी तथा निर्देशन प्रेषण',
-    descEn: 'Indicator review, feedback & directives',
-  },
-  {
-    roleNp: 'मन्त्रालय प्रयोगकर्ता (गृह)',
-    roleEn: 'Ministry User (MoHA)',
-    email: 'ministry@moha.gov.np',
-    descNp: 'मन्त्रालयअन्तर्गतका कार्यालयहरूको अनुगमन',
-    descEn: 'Monitor subordinate ministry offices',
-  },
-  {
-    roleNp: 'सरकारी कार्यालय (जि.प्र.का. काठमाडौं)',
-    roleEn: 'Office User (DAO Kathmandu)',
-    email: 'office.dao.ktm@gov.np',
-    descNp: 'प्रतिवेदन भर्ने, फिर्ता टिप्पणीको जवाफ दिने र पुनः पेश गर्ने',
-    descEn: 'Fill report, reply to feedback & resubmit',
-  },
-  {
-    roleNp: 'सरकारी कार्यालय (जि.प्र.का. दार्चुला)',
-    roleEn: 'Office User (DAO Darchula)',
-    email: 'office.darchula@gov.np',
-    descNp: 'मस्यौदा प्रतिवेदन सम्पादन, प्रमाण अपलोड र प्रमाणीकरण',
-    descEn: 'Edit draft report, upload evidence & certify',
-  },
-  {
-    roleNp: 'अवलोकनकर्ता / लेखापरीक्षक',
-    roleEn: 'Viewer / Auditor',
-    email: 'auditor@nvc.gov.np',
-    descNp: 'पढ्ने मात्र (Read-Only) अनुगमन र विश्लेषण पहुँच',
-    descEn: 'Read-only monitoring & analytics access',
-  },
-];
+import emblem from '../../emblem.webp';
+import nepalFlag from '../../nepal.gif';
+import NepaliDate from 'nepali-date-converter';
 
 export function LoginPage() {
-  const { login, loading } = useAuth();
-  const { lang, toggleLang, t } = useI18n();
+  const { login, changePassword, loading, user } = useAuth();
+  const { t } = useI18n();
 
-  const [mode, setMode] = useState<'login' | 'forgot' | 'reset'>('login');
+  const [mode, setMode] = useState<'login' | 'forgot' | 'reset' | 'signup' | 'change'>(
+    user?.must_change_password ? 'change' : 'login'
+  );
   const [identifier, setIdentifier] = useState('admin@nvc.gov.np');
   const [password, setPassword] = useState('Nvc@2083');
   const [showPass, setShowPass] = useState(false);
@@ -71,7 +23,39 @@ export function LoginPage() {
   const [resetEmail, setResetEmail] = useState('');
   const [resetCode, setResetCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [previewCode, setPreviewCode] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [signup, setSignup] = useState({
+    username: '',
+    email: '',
+    full_name_np: '',
+    phone: '',
+    office_id: '',
+  });
+  const [offices, setOffices] = useState<Array<{ id: number; office_code: string; name_np: string }>>([]);
+  const [signupLoading, setSignupLoading] = useState(false);
+
+  const currentNepaliDate = new NepaliDate(new Date());
+  const nepaliDateLabel = `वि.सं. ${currentNepaliDate.format('YYYY MMMM DD', 'np')}, ${currentNepaliDate.format('ddd', 'np')}`;
+
+  useEffect(() => {
+    if (user?.must_change_password) {
+      setMode('change');
+      setError('');
+      setInfoMsg('');
+    }
+  }, [user?.must_change_password]);
+
+  useEffect(() => {
+    if (mode !== 'signup' || offices.length > 0) return;
+    fetch('/api/public/offices')
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || 'कार्यालय सूची लोड गर्न सकिएन।');
+        setOffices(data.offices);
+      })
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : 'कार्यालय सूची लोड गर्न सकिएन।'));
+  }, [mode, offices.length]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -81,6 +65,44 @@ export function LoginPage() {
       await login(identifier, password);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Login failed');
+    }
+  };
+
+  const handleSignup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setInfoMsg('');
+    setSignupLoading(true);
+    try {
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...signup, office_id: Number(signup.office_id) }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'दर्ता अनुरोध पठाउन सकिएन।');
+      setInfoMsg(data.message);
+      setSignup({ username: '', email: '', full_name_np: '', phone: '', office_id: '' });
+      setMode('login');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'दर्ता अनुरोध पठाउन सकिएन।');
+    } finally {
+      setSignupLoading(false);
+    }
+  };
+
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setInfoMsg('');
+    if (newPassword !== confirmPassword) {
+      setError(t('नयाँ पासवर्डहरू मेल खाएनन्।', 'The new passwords do not match.'));
+      return;
+    }
+    try {
+      await changePassword(currentPassword, newPassword);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'पासवर्ड परिवर्तन गर्न सकिएन।');
     }
   };
 
@@ -97,7 +119,6 @@ export function LoginPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed');
       setInfoMsg(data.message);
-      if (data.previewResetCode) setPreviewCode(data.previewResetCode);
       setMode('reset');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Error');
@@ -129,26 +150,30 @@ export function LoginPage() {
     <div className="min-h-screen bg-[#F4F6F9] flex flex-col">
       {/* Official Government Top Strip */}
       <div className="bg-[#0F294D] text-white border-b-4 border-[#B91C1C]">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3.5 min-w-0">
-            <NvcLogo size={42} />
+            <img src={emblem} alt="National Vigilance Center Emblem" className="h-[42px] w-[42px] shrink-0 object-contain" />
             <div className="min-w-0">
               <p className="text-xs text-slate-300 leading-tight truncate">
-                {t('नेपाल सरकार · प्रधानमन्त्री तथा मन्त्रिपरिषद्को कार्यालय मातहत', 'Government of Nepal · Under Office of the Prime Minister and Council of Ministers')}
+                {t('नेपाल सरकार', 'Government of Nepal')}
               </p>
               <h1 className="text-base sm:text-lg font-bold tracking-tight text-white truncate">
                 {t('राष्ट्रिय सतर्कता केन्द्र', 'National Vigilance Center')}
               </h1>
             </div>
           </div>
-          <button
+          <div className="ml-auto flex shrink-0 items-center gap-2 text-xs sm:text-sm text-white">
+            <span className="whitespace-nowrap">{nepaliDateLabel}</span>
+            <img src={nepalFlag} alt="नेपालको झण्डा" className="h-7 w-7 shrink-0 object-contain" />
+          </div>
+          {/* <button
             type="button"
             onClick={toggleLang}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-white/10 hover:bg-white/20 rounded border border-white/20 text-white whitespace-nowrap shrink-0 transition-colors"
           >
             <Globe className="w-3.5 h-3.5" />
             {lang === 'ne' ? 'English' : 'नेपाली'}
-          </button>
+          </button> */}
         </div>
       </div>
 
@@ -189,51 +214,6 @@ export function LoginPage() {
             </div>
           </div>
 
-          {/* Role Test Accounts Selector */}
-          <div className="bg-white border border-slate-200 rounded-lg p-6">
-            <div className="flex items-center justify-between gap-4 mb-4">
-              <div>
-                <h3 className="text-sm font-bold text-[#0F294D]">
-                  {t('प्रणाली परीक्षणका लागि भूमिकागत खाता (पासवर्ड: Nvc@2083)', 'Role-Based Portal Accounts (Password: Nvc@2083)')}
-                </h3>
-                <p className="text-xs text-slate-500">
-                  {t('कुनै पनि भूमिका छनोट गरी विवरण स्वतः भर्नुहोस् र लगइन गर्नुहोस्', 'Click any role below to fill credentials and test role-based access')}
-                </p>
-              </div>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {ROLE_ACCOUNTS.map((acc) => {
-                const isSelected = identifier === acc.email;
-                return (
-                  <button
-                    key={acc.email}
-                    type="button"
-                    onClick={() => {
-                      setMode('login');
-                      setIdentifier(acc.email);
-                      setPassword('Nvc@2083');
-                      setError('');
-                    }}
-                    className={`text-left p-3 rounded-md border transition-colors ${
-                      isSelected
-                        ? 'bg-[#0F294D]/5 border-[#0F294D] ring-1 ring-[#0F294D]'
-                        : 'bg-slate-50/70 border-slate-200 hover:bg-slate-100'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-bold text-[#0F294D] truncate">
-                        {lang === 'ne' ? acc.roleNp : acc.roleEn}
-                      </span>
-                      <span className="text-[11px] font-mono text-slate-500 shrink-0">{acc.email}</span>
-                    </div>
-                    <p className="text-[11px] text-slate-600 mt-1 line-clamp-1">
-                      {lang === 'ne' ? acc.descNp : acc.descEn}
-                    </p>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
         </div>
 
         {/* Right: Login / Forgot / Reset Card */}
@@ -247,12 +227,20 @@ export function LoginPage() {
                 <h3 className="text-lg font-bold text-[#0F294D]">
                   {mode === 'login'
                     ? t('प्रणाली प्रवेश (Login)', 'Portal Sign In')
+                    : mode === 'signup'
+                    ? t('नयाँ खाता दर्ता', 'Create an Account')
+                    : mode === 'change'
+                    ? t('अस्थायी पासवर्ड परिवर्तन गर्नुहोस्', 'Change Temporary Password')
                     : mode === 'forgot'
                     ? t('पासवर्ड बिर्सनुभयो?', 'Forgot Password')
                     : t('नयाँ पासवर्ड सेट गर्नुहोस्', 'Reset Password')}
                 </h3>
                 <p className="text-xs text-slate-500">
-                  {t('आधिकारिक प्रयोगकर्ता नाम वा इमेल प्रयोग गर्नुहोस्', 'Use your official username or email')}
+                  {mode === 'change'
+                    ? t('पहिलो प्रवेशअघि नयाँ पासवर्ड राख्नुहोस्।', 'Set a new password before continuing.')
+                    : mode === 'signup'
+                    ? t('प्रशासकको स्वीकृतिपछि अस्थायी पासवर्ड इमेलमा पठाइनेछ।', 'An administrator will review your request and email a temporary password.')
+                    : t('आधिकारिक प्रयोगकर्ता नाम वा इमेल प्रयोग गर्नुहोस्', 'Use your official username or email')}
                 </p>
               </div>
             </div>
@@ -265,11 +253,6 @@ export function LoginPage() {
             {infoMsg && (
               <div className="mb-4 p-3 rounded border border-emerald-200 bg-emerald-50 text-xs text-emerald-800">
                 {infoMsg}
-                {previewCode && (
-                  <div className="mt-1 font-mono font-bold">
-                    {t('प्रमाणीकरण कोड:', 'Verification Code:')} {previewCode}
-                  </div>
-                )}
               </div>
             )}
 
@@ -339,6 +322,105 @@ export function LoginPage() {
                   <span>{loading ? t('प्रवेश हुँदैछ...', 'Signing in...') : t('प्रणालीमा प्रवेश गर्नुहोस्', 'Sign In to Portal')}</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
+                <p className="text-center text-xs text-slate-600">
+                  {t('खाता छैन?', "Don't have an account?")}{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode('signup');
+                      setError('');
+                      setInfoMsg('');
+                    }}
+                    className="font-semibold text-[#0F294D] hover:underline"
+                  >
+                    {t('दर्ता गर्नुहोस्', 'Sign up')}
+                  </button>
+                </p>
+              </form>
+            )}
+
+            {mode === 'signup' && (
+              <form onSubmit={handleSignup} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">{t('प्रयोगकर्ता नाम', 'Username')}</label>
+                  <input
+                    value={signup.username}
+                    onChange={(e) => setSignup({ ...signup, username: e.target.value })}
+                    required
+                    minLength={3}
+                    maxLength={32}
+                    pattern="[A-Za-z0-9._-]+"
+                    className="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-md"
+                    autoComplete="username"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">{t('इमेल', 'Email')}</label>
+                  <input
+                    type="email"
+                    value={signup.email}
+                    onChange={(e) => setSignup({ ...signup, email: e.target.value })}
+                    required
+                    className="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-md"
+                    autoComplete="email"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">{t('पूरा नाम', 'Full name')}</label>
+                  <input
+                    value={signup.full_name_np}
+                    onChange={(e) => setSignup({ ...signup, full_name_np: e.target.value })}
+                    required
+                    className="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-md"
+                    autoComplete="name"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">{t('सम्बन्धित सरकारी कार्यालय', 'Government office')}</label>
+                  <select
+                    value={signup.office_id}
+                    onChange={(e) => setSignup({ ...signup, office_id: e.target.value })}
+                    required
+                    className="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-md bg-white"
+                  >
+                    <option value="">{t('कार्यालय छान्नुहोस्', 'Select an office')}</option>
+                    {offices.map((office) => (
+                      <option key={office.id} value={office.id}>
+                        {office.name_np}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">{t('फोन (ऐच्छिक)', 'Phone (optional)')}</label>
+                  <input
+                    type="tel"
+                    value={signup.phone}
+                    onChange={(e) => setSignup({ ...signup, phone: e.target.value })}
+                    className="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-md"
+                    autoComplete="tel"
+                  />
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode('login');
+                      setError('');
+                      setInfoMsg('');
+                    }}
+                    className="px-4 py-2 text-xs font-medium border border-slate-300 rounded-md hover:bg-slate-50"
+                  >
+                    {t('फिर्ता', 'Back')}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={signupLoading || offices.length === 0}
+                    className="flex-1 py-2.5 px-4 bg-[#0F294D] text-white text-sm font-semibold rounded-md hover:bg-[#173a6b] disabled:opacity-60"
+                  >
+                    {signupLoading ? t('पठाउँदैछ...', 'Submitting...') : t('स्वीकृतिका लागि पठाउनुहोस्', 'Request approval')}
+                  </button>
+                </div>
               </form>
             )}
 
@@ -424,6 +506,52 @@ export function LoginPage() {
                     {t('पासवर्ड अपडेट गर्नुहोस्', 'Update Password')}
                   </button>
                 </div>
+              </form>
+            )}
+
+            {mode === 'change' && (
+              <form onSubmit={handleChangePassword} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">{t('हालको/अस्थायी पासवर्ड', 'Current / temporary password')}</label>
+                  <input
+                    type="password"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    required
+                    autoComplete="current-password"
+                    className="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-md"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">{t('नयाँ पासवर्ड (कम्तीमा ६ अक्षर)', 'New password (at least 6 characters)')}</label>
+                  <input
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    required
+                    minLength={6}
+                    autoComplete="new-password"
+                    className="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-md"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">{t('नयाँ पासवर्ड पुनः लेख्नुहोस्', 'Confirm new password')}</label>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    required
+                    minLength={6}
+                    autoComplete="new-password"
+                    className="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-md"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full py-2.5 px-4 bg-[#0F294D] text-white text-sm font-semibold rounded-md hover:bg-[#173a6b]"
+                >
+                  {t('पासवर्ड परिवर्तन गरी जारी राख्नुहोस्', 'Change password and continue')}
+                </button>
               </form>
             )}
           </div>

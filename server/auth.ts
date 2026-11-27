@@ -64,6 +64,7 @@ export function getAuthUserById(userId: number): AuthUser | null {
     .prepare(
       `SELECT u.id, u.username, u.email, u.full_name_np, u.full_name_en,
               u.designation_np, u.designation_en, u.phone, u.ministry_id, u.province_id, u.is_active,
+              u.approval_status, u.must_change_password,
               r.code AS role, r.name_np AS role_name_np, r.name_en AS role_name_en,
               m.name_np AS ministry_name_np
        FROM users u
@@ -75,7 +76,7 @@ export function getAuthUserById(userId: number): AuthUser | null {
     )
     .get(userId) as Record<string, unknown> | undefined;
 
-  if (!row) return null;
+  if (!row || row.approval_status !== 'approved') return null;
 
   const offices = db
     .prepare(
@@ -114,6 +115,7 @@ export function getAuthUserById(userId: number): AuthUser | null {
     ministry_name_np: row.ministry_name_np ? String(row.ministry_name_np) : null,
     province_id: row.province_id ? Number(row.province_id) : null,
     is_active: Boolean(row.is_active),
+    must_change_password: Boolean(row.must_change_password),
     offices: mappedOffices,
   };
 }
@@ -138,6 +140,16 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
   const user = getAuthUserById(payload.uid);
   if (!user || !user.is_active) {
     return res.status(403).json({ error: 'Account is inactive or not found' });
+  }
+  if (
+    user.must_change_password &&
+    req.path !== '/auth/change-password' &&
+    !req.originalUrl.endsWith('/auth/change-password')
+  ) {
+    return res.status(403).json({
+      error: 'तपाईंले पहिले अस्थायी पासवर्ड परिवर्तन गर्नुपर्छ।',
+      code: 'PASSWORD_CHANGE_REQUIRED',
+    });
   }
   req.authUser = user;
   next();

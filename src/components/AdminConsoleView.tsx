@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Database, Download, Plus, Shield, Users } from 'lucide-react';
+import { Database, Download, Pencil, Plus, Shield, Trash2, Users } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { useI18n } from '../context/I18nContext.tsx';
 import { GovtLevel } from '../types/index.ts';
@@ -9,10 +9,17 @@ interface AdminUserRow {
   username: string;
   email: string;
   full_name_np: string;
+  full_name_en: string;
+  designation_np: string;
+  designation_en: string;
+  phone: string;
   role_code: string;
   role_name_np: string;
+  ministry_id: number | null;
+  province_id: number | null;
   ministry_name_np: string | null;
   is_active: boolean;
+  approval_status: 'pending' | 'approving' | 'approved';
   offices: Array<{ office_id: number; office_name_np: string }>;
 }
 
@@ -59,13 +66,20 @@ export function AdminConsoleView() {
     email: '',
     password: '',
     full_name_np: '',
+    full_name_en: '',
     designation_np: '',
+    designation_en: '',
+    phone: '',
     role_code: 'office_user',
     ministry_id: '',
+    province_id: '',
     office_id: '',
   });
 
+  const [editingUserId, setEditingUserId] = useState<number | null>(null);
   const isSuper = user?.role === 'super_admin';
+  const canApproveUsers = user?.role === 'super_admin' || user?.role === 'nvc_admin';
+  const canManageUsers = canApproveUsers;
 
   const loadAdminData = async () => {
     try {
@@ -123,19 +137,119 @@ export function AdminConsoleView() {
     setError('');
     setMsg('');
     try {
-      await apiFetch('/api/admin/users', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...newUser,
-          ministry_id: newUser.ministry_id ? Number(newUser.ministry_id) : null,
-          office_id: newUser.office_id ? Number(newUser.office_id) : null,
-        }),
+      const payload = {
+        ...newUser,
+        ministry_id: newUser.ministry_id ? Number(newUser.ministry_id) : null,
+        province_id: newUser.province_id ? Number(newUser.province_id) : null,
+        office_id: newUser.office_id === '__remove__' ? 'remove' : newUser.office_id ? Number(newUser.office_id) : null,
+      };
+      await apiFetch(editingUserId ? `/api/admin/users/${editingUserId}` : '/api/admin/users', {
+        method: editingUserId ? 'PATCH' : 'POST',
+        body: JSON.stringify(payload),
       });
       await loadAdminData();
-      setMsg(t('नयाँ प्रयोगकर्ता सिर्जना गरियो।', 'New user created.'));
-      setNewUser({ username: '', email: '', password: '', full_name_np: '', designation_np: '', role_code: 'office_user', ministry_id: '', office_id: '' });
+      setMsg(
+        editingUserId
+          ? t('प्रयोगकर्ता विवरण अद्यावधिक गरियो।', 'User details updated.')
+          : t('नयाँ प्रयोगकर्ता सिर्जना गरियो।', 'New user created.')
+      );
+      setEditingUserId(null);
+      setNewUser({
+        username: '',
+        email: '',
+        password: '',
+        full_name_np: '',
+        full_name_en: '',
+        designation_np: '',
+        designation_en: '',
+        phone: '',
+        role_code: 'office_user',
+        ministry_id: '',
+        province_id: '',
+        office_id: '',
+      });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed');
+    }
+  };
+
+  const startEditingUser = (u: AdminUserRow) => {
+    setEditingUserId(u.id);
+    setNewUser({
+      username: u.username,
+      email: u.email,
+      password: '',
+      full_name_np: u.full_name_np,
+      full_name_en: u.full_name_en,
+      designation_np: u.designation_np || '',
+      designation_en: u.designation_en || '',
+      phone: u.phone || '',
+      role_code: u.role_code,
+      ministry_id: u.ministry_id ? String(u.ministry_id) : '',
+      province_id: u.province_id ? String(u.province_id) : '',
+      office_id: u.offices[0] ? String(u.offices[0].office_id) : '',
+    });
+    setError('');
+    setMsg('');
+  };
+
+  const cancelEditingUser = () => {
+    setEditingUserId(null);
+    setNewUser({
+      username: '',
+      email: '',
+      password: '',
+      full_name_np: '',
+      full_name_en: '',
+      designation_np: '',
+      designation_en: '',
+      phone: '',
+      role_code: 'office_user',
+      ministry_id: '',
+      province_id: '',
+      office_id: '',
+    });
+  };
+
+  const handleApproveUser = async (userId: number) => {
+    setError('');
+    setMsg('');
+    try {
+      const result = await apiFetch<{ message: string }>(`/api/admin/users/${userId}/approve`, { method: 'POST' });
+      await loadAdminData();
+      setMsg(result.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to approve user');
+    }
+  };
+
+  const handleToggleUser = async (userId: number) => {
+    setError('');
+    setMsg('');
+    try {
+      await apiFetch(`/api/admin/users/${userId}/toggle`, { method: 'PATCH' });
+      await loadAdminData();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to update user status');
+    }
+  };
+
+  const handleDeleteUser = async (u: AdminUserRow) => {
+    const confirmed = window.confirm(
+      t(
+        `${u.username} प्रयोगकर्ता मेटाउने? सम्बन्धित प्रतिवेदन भएका प्रयोगकर्ता मेटाउन मिल्दैन।`,
+        `Delete ${u.username}? Users with report history cannot be deleted.`
+      )
+    );
+    if (!confirmed) return;
+    setError('');
+    setMsg('');
+    try {
+      await apiFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
+      await loadAdminData();
+      setMsg(t('प्रयोगकर्ता मेटाइयो।', 'User deleted.'));
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to delete user');
     }
   };
 
@@ -314,31 +428,51 @@ export function AdminConsoleView() {
       {/* Users */}
       {tab === 'users' && master && (
         <div className="space-y-5">
-          {isSuper && (
+          {canManageUsers && (
             <form onSubmit={handleCreateUser} className="bg-white border border-slate-200 rounded-lg p-5 space-y-3">
               <h3 className="text-sm font-bold text-[#0F294D] flex items-center gap-1.5">
                 <Users className="w-4 h-4" />
-                {t('नयाँ प्रयोगकर्ता थप्नुहोस्', 'Create New User Account')}
+                {editingUserId
+                  ? t('प्रयोगकर्ता विवरण सम्पादन', 'Edit User')
+                  : t('नयाँ प्रयोगकर्ता थप्नुहोस्', 'Create New User Account')}
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
                 <input required placeholder="Username" value={newUser.username} onChange={(e) => setNewUser({ ...newUser, username: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded" />
                 <input required type="email" placeholder="Email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded" />
-                <input required type="password" placeholder="Password (min 6)" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded" />
+                {!editingUserId && (
+                  <input required type="password" minLength={6} placeholder="Password (min 6)" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded" />
+                )}
                 <input required placeholder="पूरा नाम (नेपाली)" value={newUser.full_name_np} onChange={(e) => setNewUser({ ...newUser, full_name_np: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded" />
+                <input placeholder="Full name (English)" value={newUser.full_name_en} onChange={(e) => setNewUser({ ...newUser, full_name_en: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded" />
+                <input placeholder="पद (नेपाली)" value={newUser.designation_np} onChange={(e) => setNewUser({ ...newUser, designation_np: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded" />
+                <input placeholder="Designation (English)" value={newUser.designation_en} onChange={(e) => setNewUser({ ...newUser, designation_en: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded" />
+                <input placeholder="Phone" value={newUser.phone} onChange={(e) => setNewUser({ ...newUser, phone: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded" />
                 <select value={newUser.role_code} onChange={(e) => setNewUser({ ...newUser, role_code: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded bg-white">
-                  {master.roles.map((r) => <option key={r.code} value={r.code}>{r.name_np}</option>)}
+                  {master.roles.filter((r) => isSuper || !['super_admin', 'nvc_admin'].includes(r.code)).map((r) => <option key={r.code} value={r.code}>{r.name_np}</option>)}
                 </select>
                 <select value={newUser.ministry_id} onChange={(e) => setNewUser({ ...newUser, ministry_id: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded bg-white">
                   <option value="">मन्त्रालय (ऐच्छिक)</option>
                   {master.ministries.map((m) => <option key={m.id} value={m.id}>{m.name_np}</option>)}
                 </select>
+                <select value={newUser.province_id} onChange={(e) => setNewUser({ ...newUser, province_id: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded bg-white">
+                  <option value="">प्रदेश (ऐच्छिक)</option>
+                  {master.provinces.map((p) => <option key={p.id} value={p.id}>{p.name_np}</option>)}
+                </select>
                 <select value={newUser.office_id} onChange={(e) => setNewUser({ ...newUser, office_id: e.target.value })} className="px-2.5 py-2 border border-slate-300 rounded bg-white">
-                  <option value="">कार्यालय आबद्धता (ऐच्छिक)</option>
+                  <option value="">{editingUserId ? 'कार्यालय आबद्धता परिवर्तन नगर्ने' : 'कार्यालय आबद्धता (ऐच्छिक)'}</option>
+                  {editingUserId && <option value="__remove__">कार्यालय आबद्धता हटाउनुहोस्</option>}
                   {master.offices.map((o) => <option key={o.id} value={o.id}>{o.name_np}</option>)}
                 </select>
-                <button type="submit" className="px-4 py-2 bg-[#0F294D] text-white font-semibold rounded hover:bg-[#173a6b]">
-                  {t('प्रयोगकर्ता सिर्जना', 'Create User')}
-                </button>
+                <div className="flex gap-2">
+                  <button type="submit" className="flex-1 px-4 py-2 bg-[#0F294D] text-white font-semibold rounded hover:bg-[#173a6b]">
+                    {editingUserId ? t('परिवर्तन सुरक्षित', 'Save changes') : t('प्रयोगकर्ता सिर्जना', 'Create User')}
+                  </button>
+                  {editingUserId && (
+                    <button type="button" onClick={cancelEditingUser} className="px-3 py-2 border border-slate-300 rounded hover:bg-slate-50">
+                      {t('रद्द', 'Cancel')}
+                    </button>
+                  )}
+                </div>
               </div>
             </form>
           )}
@@ -351,6 +485,7 @@ export function AdminConsoleView() {
                   <th className="p-2.5 text-left">{t('भूमिका', 'Role')}</th>
                   <th className="p-2.5 text-left">{t('आबद्ध कार्यालय / मन्त्रालय', 'Linked Office / Ministry')}</th>
                   <th className="p-2.5 text-center">{t('स्थिति', 'Status')}</th>
+                  {canManageUsers && <th className="p-2.5 text-center">{t('कार्य', 'Actions')}</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
@@ -365,14 +500,24 @@ export function AdminConsoleView() {
                       {u.offices.length > 0 ? u.offices.map((o) => o.office_name_np).join(', ') : u.ministry_name_np || 'केन्द्रीय स्तर'}
                     </td>
                     <td className="p-2.5 text-center">
-                      {isSuper ? (
+                      {u.approval_status === 'pending' && canApproveUsers ? (
                         <button
                           type="button"
-                          onClick={async () => {
-                            await apiFetch(`/api/admin/users/${u.id}/toggle`, { method: 'PATCH' });
-                            loadAdminData();
-                          }}
-                          className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${u.is_active ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'}`}
+                          onClick={() => handleApproveUser(u.id)}
+                          className="px-2 py-0.5 rounded border text-[11px] font-semibold bg-blue-50 text-blue-800 border-blue-200"
+                        >
+                          {t('स्वीकृत गरी इमेल पठाउनुहोस्', 'Approve & email password')}
+                        </button>
+                      ) : u.approval_status === 'pending' ? (
+                        <span className="text-amber-700">{t('स्वीकृति बाँकी', 'Pending approval')}</span>
+                      ) : u.approval_status === 'approving' ? (
+                        <span className="text-blue-700">{t('इमेल पठाइँदैछ', 'Approval in progress')}</span>
+                      ) : canManageUsers && (isSuper || !['super_admin', 'nvc_admin'].includes(u.role_code)) ? (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleUser(u.id)}
+                          disabled={u.id === user?.id}
+                          className={`px-2 py-0.5 rounded border text-[11px] font-semibold disabled:opacity-50 ${u.is_active ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'}`}
                         >
                           {u.is_active ? 'Active' : 'Inactive'}
                         </button>
@@ -380,6 +525,35 @@ export function AdminConsoleView() {
                         <span>{u.is_active ? 'Active' : 'Inactive'}</span>
                       )}
                     </td>
+                    {canManageUsers && (
+                      <td className="p-2.5 text-center">
+                        {isSuper || !['super_admin', 'nvc_admin'].includes(u.role_code) ? (
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => startEditingUser(u)}
+                              title={t('सम्पादन', 'Edit')}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-300 hover:bg-slate-50"
+                            >
+                              <Pencil className="w-3 h-3" />
+                              {t('सम्पादन', 'Edit')}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteUser(u)}
+                              disabled={u.id === user?.id}
+                              title={t('मेटाउनुहोस्', 'Delete')}
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              {t('मेटाउनुहोस्', 'Delete')}
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

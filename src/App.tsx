@@ -53,7 +53,7 @@ function MainShell() {
       .catch(() => {});
   }, [user, view.type]);
 
-  if (!user) return <LoginPage />;
+  if (!user || user.must_change_password) return <LoginPage />;
 
   const navItems: Array<{
     id: ViewMode['type'];

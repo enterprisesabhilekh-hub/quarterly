@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { Router, Request, Response } from 'express';
 import ExcelJS from 'exceljs';
 import { db, DB_PATH } from './db.ts';
+import { EmailConfigurationError, isEmailConfigured, sendPasswordResetEmail, sendTemporaryPasswordEmail } from './email.ts';
 import {
   AuthRequest,
   canUserAccessOffice,
@@ -34,6 +35,13 @@ apiRouter.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+apiRouter.get('/public/offices', (_req, res) => {
+  const offices = db
+    .prepare('SELECT id, office_code, name_np FROM government_offices WHERE is_active = 1 ORDER BY name_np')
+    .all();
+  res.json({ offices });
+});
+
 // ========================
 // AUTH ROUTES
 // ========================
@@ -44,11 +52,18 @@ apiRouter.post('/auth/login', (req: Request, res: Response) => {
   }
   const cleanId = identifier.trim().toLowerCase();
   const row = db
-    .prepare('SELECT id, password_hash, is_active FROM users WHERE LOWER(username) = ? OR LOWER(email) = ? LIMIT 1')
-    .get(cleanId, cleanId) as { id: number; password_hash: string; is_active: number } | undefined;
+    .prepare(
+      'SELECT id, password_hash, is_active, approval_status FROM users WHERE LOWER(username) = ? OR LOWER(email) = ? LIMIT 1'
+    )
+    .get(cleanId, cleanId) as
+    | { id: number; password_hash: string; is_active: number; approval_status: string }
+    | undefined;
 
   if (!row || !verifyPassword(password, row.password_hash)) {
     return res.status(401).json({ error: 'गलत प्रयोगकर्ता नाम/इमेल वा पासवर्ड। (Invalid credentials)' });
+  }
+  if (row.approval_status !== 'approved') {
+    return res.status(403).json({ error: 'तपाईंको खाता प्रशासकको स्वीकृतिको प्रतीक्षामा छ।' });
   }
   if (!row.is_active) {
     return res.status(403).json({ error: 'तपाईंको खाता निष्क्रिय गरिएको छ। कृपया प्रशासकसँग सम्पर्क गर्नुहोस्।' });
@@ -64,14 +79,80 @@ apiRouter.post('/auth/login', (req: Request, res: Response) => {
   res.json({ token, user });
 });
 
+apiRouter.post('/auth/signup', (req: Request, res: Response) => {
+  const { username, email, full_name_np, full_name_en, phone, office_id } = req.body || {};
+  const cleanUsername = typeof username === 'string' ? username.trim() : '';
+  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  const cleanName = typeof full_name_np === 'string' ? full_name_np.trim() : '';
+  const officeId = Number(office_id);
+
+  if (
+    !/^[a-zA-Z0-9._-]{3,32}$/.test(cleanUsername) ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) ||
+    !cleanName ||
+    !Number.isInteger(officeId) ||
+    officeId < 1
+  ) {
+    return res.status(400).json({ error: 'प्रयोगकर्ता नाम, मान्य इमेल, पूरा नाम र कार्यालय आवश्यक छन्।' });
+  }
+
+  const office = db.prepare('SELECT id FROM government_offices WHERE id = ? AND is_active = 1').get(officeId) as
+    | { id: number }
+    | undefined;
+  const officeRole = db.prepare("SELECT id FROM roles WHERE code = 'office_user'").get() as { id: number } | undefined;
+  if (!office || !officeRole) {
+    return res.status(400).json({ error: 'छनोट गरिएको कार्यालय मान्य छैन।' });
+  }
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = db
+      .prepare(
+        `INSERT INTO users (
+           username, email, password_hash, full_name_np, full_name_en, phone,
+           is_active, approval_status, must_change_password
+         ) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', 1)`
+      )
+      .run(
+        cleanUsername,
+        cleanEmail,
+        hashPassword(crypto.randomBytes(32).toString('hex')),
+        cleanName,
+        typeof full_name_en === 'string' && full_name_en.trim() ? full_name_en.trim() : cleanName,
+        typeof phone === 'string' ? phone.trim() : ''
+      );
+    const userId = Number(result.lastInsertRowid);
+    db.prepare('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)').run(userId, officeRole.id);
+    db.prepare('INSERT INTO office_users (office_id, user_id, is_head, can_submit, is_primary) VALUES (?, ?, 0, 1, 1)').run(
+      officeId,
+      userId
+    );
+    db.exec('COMMIT');
+    writeAuditLog(userId, 'SIGNUP_REQUESTED', 'user', userId, { username: cleanUsername }, req.ip || '');
+    return res.status(201).json({
+      message: 'दर्ता अनुरोध प्राप्त भयो। प्रशासकले स्वीकृत गरेपछि अस्थायी पासवर्ड इमेलमा पठाइनेछ।',
+    });
+  } catch (err) {
+    db.exec('ROLLBACK');
+    if (err instanceof Error && err.message.includes('UNIQUE constraint failed')) {
+      return res.status(409).json({ error: 'यो प्रयोगकर्ता नाम वा इमेल पहिले नै दर्ता छ।' });
+    }
+    console.error('Sign-up request failed:', err);
+    return res.status(500).json({ error: 'दर्ता अनुरोध सुरक्षित गर्न सकिएन।' });
+  }
+});
+
 apiRouter.get('/auth/me', requireAuth, (req: AuthRequest, res: Response) => {
   res.json({ user: req.authUser });
 });
 
-apiRouter.post('/auth/forgot-password', (req: Request, res: Response) => {
+apiRouter.post('/auth/forgot-password', async (req: Request, res: Response) => {
   const { email } = req.body || {};
   if (typeof email !== 'string' || !email.trim()) {
     return res.status(400).json({ error: 'Email is required.' });
+  }
+  if (!isEmailConfigured()) {
+    return res.status(503).json({ error: 'इमेल सेवा सेटअप गरिएको छैन। कृपया प्रशासकसँग सम्पर्क गर्नुहोस्।' });
   }
   const user = db
     .prepare('SELECT id, email, full_name_np FROM users WHERE LOWER(email) = ? LIMIT 1')
@@ -82,7 +163,6 @@ apiRouter.post('/auth/forgot-password', (req: Request, res: Response) => {
       message: 'यदि इमेल प्रणालीमा दर्ता छ भने पासवर्ड रिसेट कोड जारी गरिएको छ।',
     });
   }
-
   const rawCode = String(crypto.randomInt(100000, 999999));
   const tokenHash = crypto.createHash('sha256').update(rawCode).digest('hex');
   const expiresAt = Date.now() + 15 * 60 * 1000;
@@ -93,11 +173,16 @@ apiRouter.post('/auth/forgot-password', (req: Request, res: Response) => {
   );
   writeAuditLog(user.id, 'PASSWORD_RESET_REQUESTED', 'user', user.id, { email: user.email }, req.ip || '');
 
-  // Return verification code in preview mode so user can complete reset flow seamlessly without external SMTP
-  res.json({
-    message: 'पासवर्ड रिसेट प्रमाणीकरण कोड जारी गरिएको छ।',
-    previewResetCode: rawCode,
-  });
+  try {
+    await sendPasswordResetEmail(user.email, rawCode);
+    return res.json({ message: 'पासवर्ड रिसेट कोड इमेलमा पठाइएको छ।' });
+  } catch (err) {
+    db.prepare('UPDATE password_reset_tokens SET used = 1 WHERE user_id = ? AND token_hash = ?').run(user.id, tokenHash);
+    console.error('Password reset email delivery failed:', err);
+    return res.status(503).json({
+      error: err instanceof EmailConfigurationError ? err.message : 'पासवर्ड रिसेट इमेल पठाउन सकिएन।',
+    });
+  }
 });
 
 apiRouter.post('/auth/reset-password', (req: Request, res: Response) => {
@@ -124,7 +209,10 @@ apiRouter.post('/auth/reset-password', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'प्रमाणीकरण कोड गलत वा म्याद समाप्त भएको छ।' });
   }
 
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), user.id);
+  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(
+    hashPassword(newPassword),
+    user.id
+  );
   db.prepare('UPDATE password_reset_tokens SET used = 1 WHERE id = ?').run(tokenRow.id);
   writeAuditLog(user.id, 'PASSWORD_RESET_COMPLETED', 'user', user.id, {}, req.ip || '');
   res.json({ message: 'पासवर्ड सफलतापूर्वक परिवर्तन गरियो। कृपया नयाँ पासवर्डबाट लगइन गर्नुहोस्।' });
@@ -135,11 +223,17 @@ apiRouter.post('/auth/change-password', requireAuth, (req: AuthRequest, res: Res
   if (typeof currentPassword !== 'string' || typeof newPassword !== 'string' || newPassword.length < 6) {
     return res.status(400).json({ error: 'Current password and valid new password (min 6 chars) are required.' });
   }
-  const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.authUser!.id) as { password_hash: string };
+  const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.authUser!.id) as
+    | { password_hash: string }
+    | undefined;
+  if (!row) return res.status(404).json({ error: 'User not found.' });
   if (!verifyPassword(currentPassword, row.password_hash)) {
     return res.status(400).json({ error: 'हालको पासवर्ड मिलेन।' });
   }
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), req.authUser!.id);
+  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(
+    hashPassword(newPassword),
+    req.authUser!.id
+  );
   writeAuditLog(req.authUser!.id, 'PASSWORD_CHANGED', 'user', req.authUser!.id, {}, req.ip || '');
   res.json({ message: 'पासवर्ड सफलतापूर्वक परिवर्तन गरियो।' });
 });
@@ -2044,8 +2138,9 @@ apiRouter.get('/export/excel', requireAuth, async (req: AuthRequest, res: Respon
 apiRouter.get('/admin/users', requireAuth, requireRoles('super_admin', 'nvc_admin'), (_req: AuthRequest, res: Response) => {
   const users = db
     .prepare(
-      `SELECT u.id, u.username, u.email, u.full_name_np, u.full_name_en, u.designation_np, u.phone,
+      `SELECT u.id, u.username, u.email, u.full_name_np, u.full_name_en, u.designation_np, u.designation_en, u.phone,
               u.ministry_id, u.province_id, u.is_active, u.created_at,
+              u.approval_status, u.must_change_password,
               r.code AS role_code, r.name_np AS role_name_np, r.name_en AS role_name_en,
               m.name_np AS ministry_name_np
        FROM users u
@@ -2073,31 +2168,103 @@ apiRouter.get('/admin/users', requireAuth, requireRoles('super_admin', 'nvc_admi
   res.json({ users: enriched });
 });
 
-apiRouter.post('/admin/users', requireAuth, requireRoles('super_admin'), (req: AuthRequest, res: Response) => {
-  const { username, email, password, full_name_np, full_name_en, designation_np, phone, role_code, ministry_id, province_id, office_id, is_head } =
-    req.body || {};
+apiRouter.post(
+  '/admin/users/:id/approve',
+  requireAuth,
+  requireRoles('super_admin', 'nvc_admin'),
+  async (req: AuthRequest, res: Response) => {
+    if (!isEmailConfigured()) {
+      return res.status(503).json({ error: 'इमेल सेवा सेटअप गरिएको छैन; खाता स्वीकृत गर्न सकिँदैन।' });
+    }
 
-  if (!username || !email || !password || !full_name_np || !role_code) {
-    return res.status(400).json({ error: 'Required fields missing.' });
+    const userId = Number(req.params.id);
+    if (!Number.isInteger(userId) || userId < 1) {
+      return res.status(400).json({ error: 'Invalid user ID.' });
+    }
+    const pendingUser = db
+      .prepare("SELECT username, email, full_name_np FROM users WHERE id = ? AND approval_status = 'pending' AND is_active = 0")
+      .get(userId) as { username: string; email: string; full_name_np: string } | undefined;
+    if (!pendingUser) {
+      return res.status(409).json({ error: 'यो प्रयोगकर्ता स्वीकृतिका लागि उपलब्ध छैन।' });
+    }
+
+    const claim = db
+      .prepare("UPDATE users SET approval_status = 'approving' WHERE id = ? AND approval_status = 'pending' AND is_active = 0")
+      .run(userId);
+    if (Number(claim.changes) !== 1) {
+      return res.status(409).json({ error: 'यो प्रयोगकर्ता स्वीकृतिका लागि उपलब्ध छैन।' });
+    }
+
+    const temporaryPassword = `${crypto.randomBytes(12).toString('base64url')}A1!`;
+    try {
+      await sendTemporaryPasswordEmail(pendingUser.email, pendingUser.username, temporaryPassword);
+    } catch (err) {
+      db.prepare("UPDATE users SET approval_status = 'pending' WHERE id = ? AND approval_status = 'approving'").run(userId);
+      console.error('Account approval email delivery failed:', err);
+      return res.status(503).json({
+        error: err instanceof EmailConfigurationError ? err.message : 'अस्थायी पासवर्ड इमेल पठाउन सकिएन; खाता pending नै छ।',
+      });
+    }
+
+    const approved = db
+      .prepare(
+        `UPDATE users
+         SET password_hash = ?, is_active = 1, must_change_password = 1, approval_status = 'approved'
+         WHERE id = ? AND approval_status = 'approving' AND is_active = 0`
+      )
+      .run(hashPassword(temporaryPassword), userId);
+    if (Number(approved.changes) !== 1) {
+      console.error(`Account ${userId} received approval email but could not be activated.`);
+      return res.status(500).json({ error: 'इमेल पठाइयो तर खाता सक्रिय गर्न सकिएन। प्रशासकसँग सम्पर्क गर्नुहोस्।' });
+    }
+
+    writeAuditLog(req.authUser!.id, 'APPROVE_USER', 'user', userId, { username: pendingUser.username }, req.ip || '');
+    return res.json({ message: 'खाता स्वीकृत गरियो र अस्थायी पासवर्ड इमेलमा पठाइयो।' });
+  }
+);
+
+apiRouter.post('/admin/users', requireAuth, requireRoles('super_admin', 'nvc_admin'), (req: AuthRequest, res: Response) => {
+  const { username, email, password, full_name_np, full_name_en, designation_np, designation_en, phone, role_code, ministry_id, province_id, office_id, is_head } =
+    req.body || {};
+  const cleanUsername = typeof username === 'string' ? username.trim() : '';
+  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  const cleanName = typeof full_name_np === 'string' ? full_name_np.trim() : '';
+  const roleCode = typeof role_code === 'string' ? role_code : '';
+
+  if (
+    !/^[a-zA-Z0-9._-]{3,32}$/.test(cleanUsername) ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) ||
+    typeof password !== 'string' ||
+    password.length < 6 ||
+    !cleanName ||
+    !roleCode
+  ) {
+    return res.status(400).json({ error: 'मान्य प्रयोगकर्ता नाम, इमेल, ६+ अक्षरको पासवर्ड, पूरा नाम र भूमिका आवश्यक छन्।' });
+  }
+  if (req.authUser!.role === 'nvc_admin' && ['super_admin', 'nvc_admin'].includes(roleCode)) {
+    return res.status(403).json({ error: 'NVC administrator ले उच्च प्रशासनिक भूमिका सिर्जना गर्न सक्दैन।' });
   }
 
-  const roleRow = db.prepare('SELECT id FROM roles WHERE code = ?').get(String(role_code)) as { id: number } | undefined;
+  const roleRow = db.prepare('SELECT id FROM roles WHERE code = ?').get(roleCode) as { id: number } | undefined;
   if (!roleRow) return res.status(400).json({ error: 'Invalid role.' });
 
-  db.exec('BEGIN TRANSACTION;');
+  db.exec('BEGIN TRANSACTION');
   try {
     const uRes = db
       .prepare(
-        `INSERT INTO users (username, email, password_hash, full_name_np, full_name_en, designation_np, phone, ministry_id, province_id, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+        `INSERT INTO users (
+           username, email, password_hash, full_name_np, full_name_en,
+           designation_np, designation_en, phone, ministry_id, province_id, is_active
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
       )
       .run(
-        String(username).trim(),
-        String(email).trim().toLowerCase(),
-        hashPassword(String(password)),
-        String(full_name_np),
-        String(full_name_en || full_name_np),
+        cleanUsername,
+        cleanEmail,
+        hashPassword(password),
+        cleanName,
+        typeof full_name_en === 'string' && full_name_en.trim() ? full_name_en.trim() : cleanName,
         String(designation_np || ''),
+        String(designation_en || ''),
         String(phone || ''),
         ministry_id ? Number(ministry_id) : null,
         province_id ? Number(province_id) : null
@@ -2113,28 +2280,180 @@ apiRouter.post('/admin/users', requireAuth, requireRoles('super_admin'), (req: A
       );
     }
 
-    writeAuditLog(req.authUser!.id, 'CREATE_USER', 'user', newUserId, { username, role_code }, req.ip || '');
-    db.exec('COMMIT;');
-    res.status(201).json({ id: newUserId });
+    db.exec('COMMIT');
+    writeAuditLog(req.authUser!.id, 'CREATE_USER', 'user', newUserId, { username: cleanUsername, role_code: roleCode }, req.ip || '');
+    return res.status(201).json({ id: newUserId });
   } catch (err) {
-    db.exec('ROLLBACK;');
+    db.exec('ROLLBACK');
     console.error('Create user error:', err);
-    res.status(400).json({ error: 'प्रयोगकर्ता नाम वा इमेल पहिले नै दर्ता छ।' });
+    return res.status(400).json({ error: 'प्रयोगकर्ता नाम वा इमेल दोहोरिएको वा विवरण अमान्य छ।' });
   }
 });
 
-apiRouter.patch('/admin/users/:id/toggle', requireAuth, requireRoles('super_admin'), (req: AuthRequest, res: Response) => {
-  const uid = Number(req.params.id);
-  if (uid === req.authUser!.id) {
-    return res.status(400).json({ error: 'आफ्नै खाता निष्क्रिय गर्न मिल्दैन।' });
+apiRouter.patch('/admin/users/:id', requireAuth, requireRoles('super_admin', 'nvc_admin'), (req: AuthRequest, res: Response) => {
+  const userId = Number(req.params.id);
+  if (!Number.isInteger(userId) || userId < 1) return res.status(400).json({ error: 'Invalid user ID.' });
+
+  const { username, email, full_name_np, full_name_en, designation_np, designation_en, phone, role_code, ministry_id, province_id, office_id, is_head } =
+    req.body || {};
+  const cleanUsername = typeof username === 'string' ? username.trim() : '';
+  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  const cleanName = typeof full_name_np === 'string' ? full_name_np.trim() : '';
+  const roleCode = typeof role_code === 'string' ? role_code : '';
+
+  if (
+    !/^[a-zA-Z0-9._-]{3,32}$/.test(cleanUsername) ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail) ||
+    !cleanName ||
+    !roleCode
+  ) {
+    return res.status(400).json({ error: 'मान्य प्रयोगकर्ता नाम, इमेल, पूरा नाम र भूमिका आवश्यक छन्।' });
   }
-  const existing = db.prepare('SELECT is_active FROM users WHERE id = ?').get(uid) as { is_active: number } | undefined;
+
+  const existing = db
+    .prepare(
+      `SELECT r.code AS role_code, u.approval_status
+       FROM users u JOIN user_roles ur ON ur.user_id = u.id
+       JOIN roles r ON r.id = ur.role_id
+       WHERE u.id = ? LIMIT 1`
+    )
+    .get(userId) as { role_code: string; approval_status: string } | undefined;
   if (!existing) return res.status(404).json({ error: 'User not found.' });
+  if (existing.approval_status === 'approving') {
+    return res.status(409).json({ error: 'इमेल स्वीकृति प्रक्रिया चलिरहेकाले अहिले प्रयोगकर्ता परिवर्तन गर्न मिल्दैन।' });
+  }
+  if (
+    req.authUser!.role === 'nvc_admin' &&
+    (['super_admin', 'nvc_admin'].includes(existing.role_code) || ['super_admin', 'nvc_admin'].includes(roleCode))
+  ) {
+    return res.status(403).json({ error: 'NVC administrator ले उच्च प्रशासनिक भूमिका परिवर्तन गर्न सक्दैन।' });
+  }
+  if (userId === req.authUser!.id && roleCode !== existing.role_code) {
+    return res.status(400).json({ error: 'आफ्नो भूमिका परिवर्तन गर्न मिल्दैन।' });
+  }
+  const roleRow = db.prepare('SELECT id FROM roles WHERE code = ?').get(roleCode) as { id: number } | undefined;
+  if (!roleRow) return res.status(400).json({ error: 'Invalid role.' });
+
+  db.exec('BEGIN TRANSACTION');
+  try {
+    db.prepare(
+      `UPDATE users
+       SET username = ?, email = ?, full_name_np = ?, full_name_en = ?,
+           designation_np = ?, designation_en = ?, phone = ?, ministry_id = ?, province_id = ?
+       WHERE id = ?`
+    ).run(
+      cleanUsername,
+      cleanEmail,
+      cleanName,
+      typeof full_name_en === 'string' && full_name_en.trim() ? full_name_en.trim() : cleanName,
+      String(designation_np || ''),
+      String(designation_en || ''),
+      String(phone || ''),
+      ministry_id ? Number(ministry_id) : null,
+      province_id ? Number(province_id) : null,
+      userId
+    );
+    db.prepare('DELETE FROM user_roles WHERE user_id = ?').run(userId);
+    db.prepare('INSERT INTO user_roles (user_id, role_id) VALUES (?, ?)').run(userId, roleRow.id);
+    if (office_id === 'remove') {
+      db.prepare('DELETE FROM office_users WHERE user_id = ?').run(userId);
+    } else if (office_id) {
+      db.prepare('UPDATE office_users SET is_primary = 0 WHERE user_id = ?').run(userId);
+      db.prepare(
+        `INSERT INTO office_users (office_id, user_id, is_head, can_submit, is_primary)
+         VALUES (?, ?, ?, 1, 1)
+         ON CONFLICT(office_id, user_id) DO UPDATE SET is_head = excluded.is_head, is_primary = 1`
+      ).run(Number(office_id), userId, is_head ? 1 : 0);
+    }
+    db.exec('COMMIT');
+    writeAuditLog(req.authUser!.id, 'UPDATE_USER', 'user', userId, { username: cleanUsername, role_code: roleCode }, req.ip || '');
+    return res.json({ message: 'प्रयोगकर्ता विवरण अद्यावधिक गरियो।' });
+  } catch (err) {
+    db.exec('ROLLBACK');
+    console.error('Update user error:', err);
+    return res.status(400).json({ error: 'इमेल/प्रयोगकर्ता नाम दोहोरिएको वा विवरण अमान्य छ।' });
+  }
+});
+
+apiRouter.delete('/admin/users/:id', requireAuth, requireRoles('super_admin', 'nvc_admin'), (req: AuthRequest, res: Response) => {
+  const userId = Number(req.params.id);
+  if (!Number.isInteger(userId) || userId < 1) return res.status(400).json({ error: 'Invalid user ID.' });
+  if (userId === req.authUser!.id) return res.status(400).json({ error: 'आफ्नो खाता मेटाउन मिल्दैन।' });
+
+  const target = db
+    .prepare(
+      `SELECT u.username, u.approval_status, r.code AS role_code
+       FROM users u JOIN user_roles ur ON ur.user_id = u.id
+       JOIN roles r ON r.id = ur.role_id
+       WHERE u.id = ? LIMIT 1`
+    )
+    .get(userId) as { username: string; approval_status: string; role_code: string } | undefined;
+  if (!target) return res.status(404).json({ error: 'User not found.' });
+  if (target.approval_status === 'approving') {
+    return res.status(409).json({ error: 'इमेल स्वीकृति प्रक्रिया चलिरहेकाले अहिले प्रयोगकर्ता मेटाउन मिल्दैन।' });
+  }
+  if (req.authUser!.role === 'nvc_admin' && ['super_admin', 'nvc_admin'].includes(target.role_code)) {
+    return res.status(403).json({ error: 'NVC administrator ले उच्च प्रशासनिक खाता मेटाउन सक्दैन।' });
+  }
+  if (target.role_code === 'super_admin') {
+    const count = (db.prepare("SELECT COUNT(*) AS count FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE r.code = 'super_admin'").get() as { count: number }).count;
+    if (count < 2) return res.status(409).json({ error: 'अन्तिम super administrator खाता मेटाउन मिल्दैन।' });
+  }
+
+  const hasRecords = db
+    .prepare(
+      `SELECT
+         EXISTS(SELECT 1 FROM submission_attachments WHERE uploaded_by = ?) OR
+         EXISTS(SELECT 1 FROM reviews WHERE reviewer_id = ?) OR
+         EXISTS(SELECT 1 FROM feedbacks WHERE author_id = ?) OR
+         EXISTS(SELECT 1 FROM feedback_replies WHERE user_id = ?) AS has_records`
+    )
+    .get(userId, userId, userId, userId) as { has_records: number };
+  if (hasRecords.has_records) {
+    return res.status(409).json({ error: 'यो प्रयोगकर्तासँग प्रतिवेदन/समीक्षा अभिलेख जोडсон भएकाले मेटाउन मिल्दैन। निष्क्रिय गर्नुहोस्।' });
+  }
+
+  db.exec('BEGIN TRANSACTION');
+  try {
+    db.prepare('UPDATE submissions SET submitted_by = NULL WHERE submitted_by = ?').run(userId);
+    db.prepare('UPDATE submissions SET reviewed_by = NULL WHERE reviewed_by = ?').run(userId);
+    db.prepare('UPDATE submission_status_history SET changed_by = NULL WHERE changed_by = ?').run(userId);
+    db.prepare('UPDATE notifications SET user_id = NULL WHERE user_id = ?').run(userId);
+    db.prepare(
+      "UPDATE audit_logs SET user_id = NULL, details_json = '{}' WHERE user_id = ? OR (entity_type = 'user' AND entity_id = ?)"
+    ).run(userId, String(userId));
+    db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+    writeAuditLog(req.authUser!.id, 'DELETE_USER', 'user', userId, { username: target.username }, req.ip || '');
+    db.exec('COMMIT');
+    return res.json({ message: 'प्रयोगकर्ता मेटाइयो। सम्बन्धित प्रतिवेदन अभिलेख सुरक्षित राखिएका छन्।' });
+  } catch (err) {
+    db.exec('ROLLBACK');
+    console.error('Delete user error:', err);
+    return res.status(500).json({ error: 'प्रयोगकर्ता मेटाउन सकिएन।' });
+  }
+});
+
+apiRouter.patch('/admin/users/:id/toggle', requireAuth, requireRoles('super_admin', 'nvc_admin'), (req: AuthRequest, res: Response) => {
+  const userId = Number(req.params.id);
+  if (userId === req.authUser!.id) return res.status(400).json({ error: 'आफ्नो खाता निष्क्रिय गर्न मिल्दैन।' });
+  const existing = db
+    .prepare(
+      `SELECT u.is_active, u.approval_status, r.code AS role_code
+       FROM users u JOIN user_roles ur ON ur.user_id = u.id
+       JOIN roles r ON r.id = ur.role_id
+       WHERE u.id = ? LIMIT 1`
+    )
+    .get(userId) as { is_active: number; approval_status: string; role_code: string } | undefined;
+  if (!existing) return res.status(404).json({ error: 'User not found.' });
+  if (existing.approval_status !== 'approved') return res.status(409).json({ error: 'पहिले registration request स्वीकृत गर्नुहोस्।' });
+  if (req.authUser!.role === 'nvc_admin' && ['super_admin', 'nvc_admin'].includes(existing.role_code)) {
+    return res.status(403).json({ error: 'NVC administrator ले उच्च प्रशासनिक खाता परिवर्तन गर्न सक्दैन।' });
+  }
 
   const nextActive = existing.is_active ? 0 : 1;
-  db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(nextActive, uid);
-  writeAuditLog(req.authUser!.id, 'TOGGLE_USER_ACTIVE', 'user', uid, { is_active: Boolean(nextActive) }, req.ip || '');
-  res.json({ is_active: Boolean(nextActive) });
+  db.prepare('UPDATE users SET is_active = ? WHERE id = ?').run(nextActive, userId);
+  writeAuditLog(req.authUser!.id, 'TOGGLE_USER_ACTIVE', 'user', userId, { is_active: Boolean(nextActive) }, req.ip || '');
+  return res.json({ is_active: Boolean(nextActive) });
 });
 
 apiRouter.post('/admin/offices', requireAuth, requireRoles('super_admin'), (req: AuthRequest, res: Response) => {

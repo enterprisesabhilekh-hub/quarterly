@@ -739,7 +739,13 @@ export function DashboardView({ onOpenSubmission }: Props) {
                       <tr key={s.id} className="hover:bg-slate-50">
                         <td className="p-2 font-medium text-slate-900">{lang === 'ne' ? s.office_name_np : s.office_name_en}</td>
                         <td className="p-2 text-slate-600">{s.province_name_np} · {s.district_name_np}</td>
-                        <td className="p-2"><StatusTag status={s.status} lang={lang} /></td>
+                        <td className="p-2">
+                          <StatusTag
+                            status={s.status}
+                            lang={lang}
+                            labelOverride={s.status === 'Under Review' && lang === 'ne' ? 'विचाराधीन' : undefined}
+                          />
+                        </td>
                         <td className="p-2 text-right font-bold tabular-nums">{formatPct(s.implementation_score, lang)}</td>
                         <td className="p-2 text-right">
                           <button

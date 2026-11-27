@@ -32,6 +32,7 @@ interface AuthContextValue {
   master: MasterData | null;
   loading: boolean;
   login: (identifier: string, password: string) => Promise<void>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => void;
   refreshMaster: () => Promise<void>;
   apiFetch: <T = unknown>(url: string, options?: RequestInit) => Promise<T>;
@@ -123,12 +124,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
         setToken(data.token);
         setUser(data.user);
-        await loadMaster(data.token);
+        if (!data.user.must_change_password) {
+          await loadMaster(data.token);
+        }
       } finally {
         setLoading(false);
       }
     },
     [loadMaster]
+  );
+
+  const changePassword = useCallback(
+    async (currentPassword: string, newPassword: string) => {
+      await apiFetch('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      setUser((currentUser) => (currentUser ? { ...currentUser, must_change_password: false } : currentUser));
+      if (token) {
+        await loadMaster(token);
+      }
+    },
+    [apiFetch, token, loadMaster]
   );
 
   const logout = useCallback(() => {
@@ -149,6 +166,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         master,
         loading,
         login,
+        changePassword,
         logout,
         refreshMaster,
         apiFetch: (url, options) => apiFetch(url, options),

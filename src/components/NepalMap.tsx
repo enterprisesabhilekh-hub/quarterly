@@ -142,8 +142,8 @@ export function NepalMap({
         <div>
           <h3 className="text-base font-bold text-[#0F294D]">
             {lang === 'ne'
-              ? 'नेपालको भौगोलिक अनुगमन नक्सा (७ प्रदेश · ७७ जिल्ला · चुच्चे नक्सा सहित)'
-              : 'Nepal Geographical Monitoring Map (7 Provinces · 77 Districts)'}
+              ? 'नेपालको भौगोलिक अनुगमन नक्सा'
+              : 'Nepal Geographical Monitoring Map'}
           </h3>
           <p className="text-xs text-slate-500">
             {lang === 'ne'

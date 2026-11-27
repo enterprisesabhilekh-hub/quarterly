@@ -55,6 +55,7 @@ export interface AuthUser {
   ministry_name_np?: string | null;
   province_id: number | null;
   is_active: boolean;
+  must_change_password: boolean;
   offices: UserOfficeLink[];
 }
 

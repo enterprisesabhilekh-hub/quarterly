@@ -1,28 +1,17 @@
 import React from 'react';
 import { CheckCircle2, Clock, AlertTriangle, FileEdit, RotateCcw, Eye, Send, XCircle } from 'lucide-react';
 import { SubmissionStatus } from '../types/index.ts';
+import emblem from '../../emblem.webp';
 
 export function NvcLogo({ size = 44 }: { size?: number }) {
   return (
-    <svg
+    <img
+      src={emblem}
       width={size}
       height={size}
-      viewBox="0 0 64 64"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-label="National Vigilance Center Emblem"
-      className="shrink-0"
-    >
-      <circle cx="32" cy="32" r="30" fill="#0F294D" stroke="#DC143C" strokeWidth="2.5" />
-      <circle cx="32" cy="32" r="25" stroke="#E2E8F0" strokeWidth="1" strokeDasharray="2 2" />
-      {/* Himalayan Crest */}
-      <path d="M14 40L24 24L31 33L39 20L50 40H14Z" fill="#FFFFFF" fillOpacity="0.92" />
-      <path d="M24 24L27.5 29L24 31L20.5 29L24 24Z" fill="#0F294D" />
-      <path d="M39 20L43.5 27.5L39 30L34.5 27.5L39 20Z" fill="#0F294D" />
-      {/* Vigilance Eye / Balance Arch */}
-      <path d="M18 45H46" stroke="#DC143C" strokeWidth="2.5" strokeLinecap="round" />
-      <circle cx="32" cy="14" r="3" fill="#F59E0B" />
-    </svg>
+      alt="National Vigilance Center Emblem"
+      className="shrink-0 object-contain"
+    />
   );
 }
 
@@ -86,13 +75,21 @@ const STATUS_META: Record<
   },
 };
 
-export function StatusTag({ status, lang }: { status: SubmissionStatus; lang: 'ne' | 'en' }) {
+export function StatusTag({
+  status,
+  lang,
+  labelOverride,
+}: {
+  status: SubmissionStatus;
+  lang: 'ne' | 'en';
+  labelOverride?: string;
+}) {
   const meta = STATUS_META[status] || STATUS_META.Draft;
   const Icon = meta.Icon;
   return (
     <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded border whitespace-nowrap ${meta.cls}`}>
       <Icon className="w-3.5 h-3.5 shrink-0" />
-      <span>{lang === 'ne' ? meta.np : meta.en}</span>
+      <span>{labelOverride || (lang === 'ne' ? meta.np : meta.en)}</span>
     </span>
   );
 }
